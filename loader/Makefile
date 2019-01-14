@@ -31,7 +31,7 @@ OBJ_TESTS= \
 
 FINAL=a.out
 
-CFLAGS= -I. -I../include
+CFLAGS= -std=c11 -g -O0 -I. -I../include
 
 
 .PHONE: all

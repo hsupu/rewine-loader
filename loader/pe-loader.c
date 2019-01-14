@@ -92,28 +92,39 @@ static mmap_info_t * mmap_zero(size_t size) {
 /**
  * get relative virtual address
  */
-static PVOID rva2va(image_info_t *info, LONG_PTR offset) {
-    return info->map->addr + offset;
+static PVOID rva2va(image_info_t *image, LONG_PTR offset) {
+    if (offset >= image->map->size) {
+        fprintf(stderr, "ERR: rva2va: out of range: offset=%#zx size=%#zx\n", offset, image->map->size);
+        return NULL;
+    }
+    return image->map->addr + offset;
 }
 
 // funcs
 
-static int load_dll(PBSTR filename, OUT image_info_t **out_dll);
+static int load_dll(PBSTR filename, OUT image_info_t **out_image);
 
-static int mmap_image_file(int fd, mmap_info_t *mi) {
+static int mmap_image_file(int fd, OUT mmap_info_t **out_mi) {
     struct stat fd_stat;
     if (fstat(fd, &fd_stat) < 0) {
+        return 1;
+    }
+    mmap_info_t *mi = MALLOC(mmap_info_t, 1);
+    if (!mi) {
         return 2;
     }
+    *out_mi = mi;
+
+    mi->offset = 0;
     mi->size = fd_stat.st_size;
-    if ((mi->addr = mmap(NULL, mi->size, PROT_READ, MAP_SHARED, fd, 0)) == (void *)-1) {
+    mi->addr = mmap(NULL, mi->size, PROT_READ, MAP_SHARED, fd, mi->offset);
+    if (mi->addr == (void *)-1) {
         return 3;
     }
-    close(fd);
     return 0;
 }
 
-static NTSTATUS get_nt_from_mmap(mmap_info_t *mi, image_nt_headers_t **pnt) {
+static NTSTATUS get_nt_from_mmap(mmap_info_t *mi, OUT image_nt_headers_t **out_nt) {
     rewine_mmap_rewind(mi);
 
     IMAGE_DOS_HEADER *dos;
@@ -130,7 +141,7 @@ static NTSTATUS get_nt_from_mmap(mmap_info_t *mi, image_nt_headers_t **pnt) {
         if (os2->ne_exetyp == 5) return STATUS_INVALID_IMAGE_PROTECT;
         return STATUS_INVALID_IMAGE_NE_FORMAT;
     }
-    *pnt = nt;
+    *out_nt = nt;
     return STATUS_SUCCESS;
 }
 
@@ -331,6 +342,7 @@ static NTSTATUS load_image(image_info_t *image) {
             sec_mmap->offset = sec->VirtualAddress;
             sec_mmap->addr = rva2va(image, sec_mmap->offset);
             sec_mmap->size = align_to_page(0, (sec->Misc.VirtualSize) ? sec->Misc.VirtualSize : sec->SizeOfRawData);
+            //fprintf(stdout, "INFO: load_image offset=%#zx mapping=%p+%#zx\n", sec_mmap->offset, sec_mmap->addr, sec_mmap->size);
 
             memcpy(sec_mmap->addr, fmi->addr + file_offset, sec_mmap->size);
         }
@@ -339,58 +351,57 @@ static NTSTATUS load_image(image_info_t *image) {
     return STATUS_SUCCESS;
 }
 
-static NTSTATUS relocate(image_info_t *image) {
+static int relocate(image_info_t *image) {
 
     // from wine/dlls/ntdll/loader.c perform_relocations()
 
     if (image->is_flatmap) {
         // cannot relocate on non page-aligned binary
         fprintf(stdout, "cannot relocate on non page-aligned binary\n");
-        return STATUS_SUCCESS;
+        return 0;
     }
 
     if (!(image->nt->FileHeader.Characteristics & IMAGE_FILE_DLL)) {
-        // we only relocate DLL now
-        fprintf(stdout, "we only relocate DLL now\n");
-        return STATUS_SUCCESS;
+        fprintf(stdout, "relocate DLL only\n");
+        return 0;
+    }
+
+    if (!(image->dll_charact & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE)) {
+        fprintf(stderr, "ERR: relocate: fixed image base\n");
+        return 1;
     }
 
     if (image->nt->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED) {
-        // relocation info is stripped
-        return STATUS_CONFLICTING_ADDRESSES;
+        fprintf(stderr, "ERR: relocate: relocation info is stripped\n");
+        return 2;
     }
 
     ULONG size;
     PIMAGE_BASE_RELOCATION reld = RtlImageDirectoryEntryToData(image->map->addr, TRUE, IMAGE_DIRECTORY_ENTRY_BASERELOC, &size);
-    if (!reld) return STATUS_CONFLICTING_ADDRESSES;
+    if (!reld) return 0;
 
     INT_PTR delta = (LONG_PTR)(image->map->addr - image->image_base);
 
     size_t used = 0;
     while (used < size) {
         used += reld->SizeOfBlock;
-
-        if (reld->VirtualAddress >= image->image_size) {
-            return STATUS_ACCESS_VIOLATION;
-        }
-
         // reld is followed by some Type/Offset field entries
         UINT nb_block = (reld->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
         // returned address of the next reld
         reld = LdrProcessRelocationBlock(rva2va(image, reld->VirtualAddress), nb_block, (PWORD)(reld + 1), delta);
-        if (!reld) return STATUS_INVALID_IMAGE_FORMAT;
+        if (!reld) return 3;
     }
 
-    return STATUS_SUCCESS;
+    return 0;
 }
 
-static NTSTATUS load_exports(image_info_t *image) {
+static int load_exports(image_info_t *image) {
     ULONG size;
     PIMAGE_EXPORT_DIRECTORY expd = RtlImageDirectoryEntryToData(image->map->addr, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &size);
-    if (!expd) return STATUS_SUCCESS;
+    if (!expd) return 0;
 
     image->export_name = cstr2bstr(rva2va(image, expd->Name));
-    fprintf(stdout, "INFO: load_exports export_name=\"%s\"\n", image->export_name->str);
+    //fprintf(stdout, "INFO: load_exports export_name=\"%s\"\n", image->export_name->str);
 
     size_t nb_export;
     nb_export = image->nb_export = expd->NumberOfFunctions;
@@ -402,7 +413,7 @@ static NTSTATUS load_exports(image_info_t *image) {
     PWORD ordinal_tbl = rva2va(image, expd->AddressOfNameOrdinals);
 
     image_export_t *export;
-    export = image->exp_tbl = MALLOC(image_export_t, nb_export);
+    export = image->export_tbl = MALLOC(image_export_t, nb_export);
     for (int i = 0; i < nb_export; i++, export++) {
         export->ordinal = ordinal_base + i;
         export->addr = rva2va(image, fn_tbl[i]);
@@ -419,18 +430,19 @@ static NTSTATUS load_exports(image_info_t *image) {
     for (int i = 0; i < expd->NumberOfNames; i++) {
         PCSTR name = rva2va(image, name_tbl[i]);
         WORD index = ordinal_tbl[i]; // not absolute ordinal
-        image->exp_tbl[index].name = name;
+        image->export_tbl[index].name = name;
+        //fprintf(stdout, "%s export %s on %p\n", image->export_name->str, name, image->export_tbl[index].addr);
     }
 
-    return STATUS_SUCCESS;
+    return 0;
 }
 
-static int find_dll_in_ll(ll_t *ll, size_t offset, void *ptr, void *arg, void **result) {
+static int find_dll_in_ll(ll_t *ll, size_t offset, void *ptr, void *arg, void **presult) {
     image_info_t *image = (image_info_t *)ptr;
     if (image->export_name) {
         PBSTR name = (PBSTR)arg;
         if (strcmp(image->export_name->str, name->str) == 0) {
-            *((image_info_t **)result) = image;
+            *((image_info_t **)presult) = image;
             return 1;
         }
     }
@@ -448,6 +460,9 @@ static PVOID get_forwarded_export(image_info_t *image, PCSTR label) {
     return NULL;
 }
 
+/**
+ * unchecked
+ */
 static PVOID get_export(image_info_t *image, image_export_t *export) {
     if (export->type == IMAGE_EXPORT_EXPORT) {
         return export->addr;
@@ -457,8 +472,9 @@ static PVOID get_export(image_info_t *image, image_export_t *export) {
 }
 
 static PVOID get_export_by_ordinal(image_info_t *image, WORD ordinal) {
+    if (!image || !image->nb_export) return NULL;
     int index = ordinal - image->exp_ordinal_base;
-    image_export_t *export = image->exp_tbl + index;
+    image_export_t *export = image->export_tbl + index;
     return get_export(image, export);
 }
 
@@ -466,8 +482,9 @@ static PVOID get_export_by_ordinal(image_info_t *image, WORD ordinal) {
  * TODO: try names[hint] first, then bsearch(name)
  */
 static PVOID get_export_by_name(image_info_t *image, WORD hint, PCSTR name) {
+    if (!image || !image->nb_export) return NULL;
     for (int i = 0; i < image->nb_export; i++) {
-        image_export_t *export = image->exp_tbl + i;
+        image_export_t *export = image->export_tbl + i;
         if (!export->name) continue;
         if (strcmp(export->name, name) == 0) {
             return get_export(image, export);
@@ -476,14 +493,14 @@ static PVOID get_export_by_name(image_info_t *image, WORD hint, PCSTR name) {
     return NULL;
 }
 
-static int import_dll(image_info_t *master, PIMAGE_IMPORT_DESCRIPTOR impd, OUT image_info_t **out_dll) {
+static int import_dll(image_info_t *image, PIMAGE_IMPORT_DESCRIPTOR impd, OUT image_info_t **out_dependency) {
     int ret;
 
     // from wine/dlls/ntdll/loader.c import_dll()
 
-    PSTR name = rva2va(master, impd->Name);
+    PSTR name = rva2va(image, impd->Name);
     size_t name_len = strlen(name);
-    fprintf(stdout, "INFO: import_dll \"%s\" import \"%s\"\n", master->export_name->str, name);
+    //fprintf(stdout, "INFO: import_dll \"%s\" import \"%s\"\n", image->export_name->str, name);
 
     while (name_len && name[name_len-1] == ' ') name_len--; // remove trailing spaces
     if (!name_len) {
@@ -492,71 +509,69 @@ static int import_dll(image_info_t *master, PIMAGE_IMPORT_DESCRIPTOR impd, OUT i
     name[name_len] = '\0';
 
     PBSTR bname = cstr2bstr(name);
-    image_info_t *dll;
-    ret = load_dll(bname, &dll);
+    ret = load_dll(bname, out_dependency);
     if (ret) {
         fprintf(stderr, "ERR: import_dll load_dll: %d %s\n", ret, bname->str);
-        return 2;
     }
 
-    PIMAGE_THUNK_DATA ilt = rva2va(master, impd->u.OriginalFirstThunk); // readonly
-    PIMAGE_THUNK_DATA iat = rva2va(master, impd->FirstThunk); // rw
+    PIMAGE_THUNK_DATA ilt = rva2va(image, impd->u.OriginalFirstThunk); // readonly
+    PIMAGE_THUNK_DATA iat = rva2va(image, impd->FirstThunk); // rw
 
+    image_info_t *dependency = *out_dependency;
     while (ilt->u1.Ordinal) {
         PVOID va;
         if (IMAGE_SNAP_BY_ORDINAL(ilt->u1.Ordinal)) {
             WORD ordinal = IMAGE_ORDINAL(ilt->u1.Ordinal);
-            va = get_export_by_ordinal(dll, ordinal);
-            fprintf(stdout, "#%d %p\n", ordinal, va);
+            va = get_export_by_ordinal(dependency, ordinal);
+            //fprintf(stdout, "%s import #%d on %p\n", image->export_name->str, ordinal, va);
             if (!va) {
-                va = stub(dll, ordinal, NULL);
+                va = stub(dependency, ordinal, NULL);
             }
         } else {
-            PIMAGE_IMPORT_BY_NAME symbol = rva2va(master, ilt->u1.AddressOfData);
-            va = get_export_by_name(dll, symbol->Hint, symbol->Name);
-            fprintf(stdout, "%s %p\n", symbol->Name, va);
+            PIMAGE_IMPORT_BY_NAME symbol = rva2va(image, ilt->u1.AddressOfData);
+            va = get_export_by_name(dependency, symbol->Hint, symbol->Name);
+            //fprintf(stdout, "%s import %s on %p\n", image->export_name->str, symbol->Name, va);
             if (!va) {
-                va = stub(dll, 0, symbol->Name);
+                va = stub(dependency, 0, symbol->Name);
             }
         }
+
         iat->u1.Function = (LONG_PTR)va;
         ilt++;
         iat++;
     }
 
-    *out_dll = dll;
     return 0;
 }
 
-static int fixup_imports(image_info_t *info) {
+static int fixup_imports(image_info_t *image) {
     int ret;
 
     // from wine/dlls/ntdll/loader.c fixup_imports()
 
-    if (info->map_flags & IMAGE_MAP_FLAGS_IMPORTS_FIXED_UP) return 0;
-    info->map_flags ^= IMAGE_MAP_FLAGS_IMPORTS_FIXED_UP;
+    if (image->map_flags & IMAGE_MAP_FLAGS_IMPORTS_FIXED_UP) return 0;
+    image->map_flags ^= IMAGE_MAP_FLAGS_IMPORTS_FIXED_UP;
 
     ULONG size;
-    PIMAGE_IMPORT_DESCRIPTOR impd_tbl = RtlImageDirectoryEntryToData(info->map->addr, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &size);
+    PIMAGE_IMPORT_DESCRIPTOR impd_tbl = RtlImageDirectoryEntryToData(image->map->addr, TRUE, IMAGE_DIRECTORY_ENTRY_IMPORT, &size);
     if (!impd_tbl) return 0;
 
-    size_t nb_imports = -1; // last one is placeholder
+    size_t nb_dependency = -1; // last one is placeholder
     PIMAGE_IMPORT_DESCRIPTOR impd = impd_tbl;
     while (impd->Name && impd->FirstThunk) {
-        nb_imports++;
+        nb_dependency++;
         impd++;
     }
-    fprintf(stdout, "INFO: fixup_imports nb_imports=%lu\n", nb_imports);
-    if (!nb_imports) return 0;
+    image->nb_dependency = nb_dependency;
+    //fprintf(stdout, "INFO: fixup_imports nb_dependency=%lu\n", nb_dependency);
+    if (!nb_dependency) return 0;
 
-    image_info_t *dll;
+    image->dependencies = MALLOC(image_info_t *, nb_dependency);
 
-    info->dep_count = nb_imports;
-    info->deps = MALLOC(image_info_t *, nb_imports);
-
-    for (int i = 0; i < nb_imports; i++) {
-        dll = info->deps[i];
-        ret = import_dll(info, impd_tbl + i, &dll);
+    image_info_t *dep;
+    for (int i = 0; i < nb_dependency; i++) {
+        dep = image->dependencies[i];
+        ret = import_dll(image, impd_tbl + i, &dep);
         if (ret) {
             fprintf(stderr, "ERR: fixup_imports import_dll: %d\n", ret);
         }
@@ -565,66 +580,80 @@ static int fixup_imports(image_info_t *info) {
     return 0;
 }
 
-static int load_native_dll(PBSTR filename, int fd, OUT image_info_t **out_dll) {
+static int fixup_delayload_import(image_info_t *image) {
+    int ret;
+
+    ULONG size;
+    PIMAGE_DELAYLOAD_DESCRIPTOR impd_tbl = RtlImageDirectoryEntryToData(image->map->addr, TRUE, IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, &size);
+    if (!impd_tbl) return 0;
+
+    return 0;
+}
+
+static int load_native_dll(image_info_t *image, int fd) {
     int ret;
     NTSTATUS status;
 
     mmap_info_t *fmi;
-    fmi = MALLOC(mmap_info_t, 1);
-
-    ret = mmap_image_file(fd, fmi);
+    ret = mmap_image_file(fd, &fmi);
     if (ret) {
         fprintf(stderr, "ERR: load_native_dll mmap_image_file: %d\n", ret);
         return 1;
     }
+    image->filemap = fmi;
 
-    image_info_t *dll;
-    dll = MALLOC(image_info_t, 1);
-    dll->filemap = fmi;
-    dll->filename = filename;
-
-    status = load_image(dll);
+    status = load_image(image);
     if (status) {
         fprintf(stderr, "ERR: load_native_dll load_image: %x\n", status);
         return 2;
     }
 
-    status = relocate(dll);
-    if (status) {
-        fprintf(stderr, "ERR: load_native_dll relocate: %x\n", status);
+    ret = relocate(image);
+    if (ret) {
+        fprintf(stderr, "ERR: load_native_dll relocate: %d\n", ret);
         return 3;
     }
 
-    status = load_exports(dll);
-    if (status) {
-        fprintf(stderr, "ERR: load_native_dll load_exports: %x\n", status);
+    ret = load_exports(image);
+    if (ret) {
+        fprintf(stderr, "ERR: load_native_dll load_exports: %d\n", ret);
         return 4;
     }
 
-    if ((dll->file_charact & IMAGE_FILE_DLL)
-            || (dll->subsystem == IMAGE_SUBSYSTEM_NATIVE)) {
-        ret = fixup_imports(dll);
+    if ((image->file_charact & IMAGE_FILE_DLL)
+            || (image->subsystem == IMAGE_SUBSYSTEM_NATIVE)) {
+        ret = fixup_imports(image);
         if (ret) {
             fprintf(stderr, "ERR: load_native_dll fixup_imports: %d\n", ret);
             return 5;
         }
     }
 
-    fprintf(stdout, "INFO: loaded %s (%p)\n", dll->export_name->str, filename);
+    fprintf(stdout, "INFO: loaded %s (%p)\n", image->export_name->str, image->filename->str);
     
-    *out_dll = dll;
     return 0;
 }
 
-static int load_dll(PBSTR filename, OUT image_info_t **out_dll) {
+static int load_dll(PBSTR filename, OUT image_info_t **out_image) {
     int ret;
 
     PBSTR basename = cstr2bstr(get_basename(filename->str));
 
     fprintf(stdout, "INFO: load_dll %s\n", basename->str);
 
-    *out_dll = find_dll_in_memory(basename);
-    if (*out_dll) return 0;
+    *out_image = find_dll_in_memory(basename);
+    if (*out_image) {
+        fprintf(stdout, "INFO: load_dll: %s already loaded\n", basename->str);
+        return 0;
+    }
+
+    image_info_t *image = MALLOC(image_info_t, 1);
+    memset(image, 0, sizeof(*image));
+    ll_push(image_info_ll, image);
+    *out_image = image;
+
+    image->filename = filename;
+    image->export_name = filename;
 
     RAII_FD int fd;
     fd = open(filename->str, O_RDONLY);
@@ -632,7 +661,8 @@ static int load_dll(PBSTR filename, OUT image_info_t **out_dll) {
         return 1;
     }
 
-    ret = load_native_dll(basename, fd, out_dll);
+    ret = load_native_dll(image, fd);
+    close(fd);
     if (ret) {
         fprintf(stderr, "ERR: load_dll load_native_dll: %d\n", ret);
         return 2;

@@ -5,10 +5,14 @@
 
 #include "../pe-loader.h"
 
+typedef int (WINAPI *PFMyAdd)(int, int);
+
 int main(int argc, const char *argv[]) {
-    PCSTR dirname = get_dirname(argv[1]);
-    PCSTR basename = get_basename(argv[1]);
-    fprintf(stdout, "%s / %s\n", dirname, basename);
+    PCSTR fullname = "/mnt/hgfs/shared/HelloDll.dll";
+
+    PCSTR dirname = get_dirname(fullname);
+    PCSTR basename = get_basename(fullname);
+    fprintf(stdout, "%s/ %s\n", dirname, basename);
 
     chdir(dirname);
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -20,10 +24,9 @@ int main(int argc, const char *argv[]) {
     }
     fprintf(stdout, "INFO: LoadLibrary() %p\n", hDll);
 
-    int (*lstrlenA)(LPCSTR lpString);
-    lstrlenA = rewine_GetProcAddressByName(hDll, "lstrlenA");
-    fprintf(stdout, "lstrlenA=%p\n", lstrlenA);
-    int ret = lstrlenA("Hello World.");
+    PFMyAdd pf = (PFMyAdd)rewine_GetProcAddressByName(hDll, "myadd");
+    fprintf(stdout, "pf=%p\n", pf);
+    int ret = pf(1, 2);
     fprintf(stdout, "ret=%d\n", ret);
 
     return 0;

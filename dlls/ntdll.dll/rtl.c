@@ -1,3 +1,5 @@
+#include <stdio.h>
+
 #include "winapi/rtl.h"
 
 
@@ -81,10 +83,10 @@ PVOID WINAPI RtlImageDirectoryEntryToData(
     default:
         return NULL;
     }
-    if (entry == NULL) return NULL;
+    if (!entry || !entry->VirtualAddress) return NULL;
 
-    *Size = entry->Size;
     DWORD addr = entry->VirtualAddress;
+    *Size = entry->Size;
 
     if (MappedAsImage || addr < headers_size) {
         return Base + addr;

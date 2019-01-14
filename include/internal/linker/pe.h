@@ -63,10 +63,10 @@ typedef struct _image_info {
     bstr_t                  *export_name;
     size_t                  nb_export;
     DWORD                   exp_ordinal_base;
-    image_export_t          *exp_tbl;
+    image_export_t          *export_tbl;
 
-    size_t                  dep_count;
-    struct _image_info      **deps;
+    size_t                  nb_dependency;
+    struct _image_info      **dependencies;
     
     // mmap (and relative)
 

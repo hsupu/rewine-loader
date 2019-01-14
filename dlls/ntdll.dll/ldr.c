@@ -16,8 +16,8 @@ PIMAGE_BASE_RELOCATION WINAPI LdrProcessRelocationBlock(PVOID page, UINT count, 
     INT_PTR loword = LOWORD(delta);
     while (count--) {
         USHORT offset = *rel & 0xfff;
-        PVOID addr = page + offset;
         int type = *rel >> 12;
+        PVOID addr = page + offset;
         switch(type) {
         case IMAGE_REL_BASED_ABSOLUTE:
             break;
