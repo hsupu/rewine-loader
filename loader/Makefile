@@ -31,7 +31,7 @@ OBJ_TESTS= \
 
 FINAL=a.out
 
-CFLAGS= -std=c11 -g -O0 -I. -I../include
+CFLAGS= -std=c11 -g -O0 -I. -I../include -D_WIN64 -D_POSIX_C_SOURCE=20190115
 
 
 .PHONE: all

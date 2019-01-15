@@ -12,9 +12,9 @@ void __cleanup_fd(int *fd) {
         close(*fd);
 }
 
-void __cleanup_mem(void **p) {
-    if (*p)
-        free(*p);
+void __cleanup_mem(void *p) {
+    if (*(void **)p)
+        free(*(void **)p);
 }
 
 void __cleanup_mmap_info(mmap_info_t *info) {

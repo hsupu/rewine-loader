@@ -10,14 +10,14 @@
 
 // PE Format : https://docs.microsoft.com/en-us/windows/desktop/Debug/pe-format
 
-typedef struct _IMAGE_NT_HEADERS_PORTABLE {
-    DWORD Signature;
-    IMAGE_FILE_HEADER FileHeader;
-    union {
-        IMAGE_OPTIONAL_HEADER32 hdr32;
-        IMAGE_OPTIONAL_HEADER64 hdr64;
-    } OptionalHeader;
-} image_nt_headers_t;
+// typedef struct _IMAGE_NT_HEADERS_PORTABLE {
+//     DWORD Signature;
+//     IMAGE_FILE_HEADER FileHeader;
+//     union {
+//         IMAGE_OPTIONAL_HEADER32 hdr32;
+//         IMAGE_OPTIONAL_HEADER64 hdr64;
+//     } OptionalHeader;
+// } image_nt_headers_t;
 
 typedef enum _machine_type {
     MACHINE_I386, MACHINE_AMD64
@@ -32,12 +32,27 @@ typedef enum _image_export_type {
     IMAGE_EXPORT_FORWARDER,
 } image_export_type_t;
 
-typedef struct _image_export_entry {
+typedef struct _image_export_symbol_entry {
     DWORD                   ordinal;
     LPCSTR                  name;
     image_export_type_t     type;
-    PVOID                   addr;
-} image_export_t;
+    PVOID                   address;
+    PVOID                   original;   // NULL means unmodified
+} image_export_symbol_t;
+
+typedef struct _image_import_symbol_entry {
+    WORD                    ordinal;    // 0 means import by name
+    PIMAGE_IMPORT_BY_NAME   name;
+    PIMAGE_THUNK_DATA       iat_entry;
+    PVOID                   stub;
+    PVOID                   original;   // NULL means unmodified
+} image_import_symbol_t;
+
+typedef struct _image_import_dll_entry {
+    struct _image_info      *image;
+    size_t                  nb_symbol;
+    image_import_symbol_t   *symbol_tbl;
+} image_import_dll_t;
 
 typedef struct _image_info {
 
@@ -47,10 +62,12 @@ typedef struct _image_info {
     size_t                  image_size;
     size_t                  headers_size;
 
-    DWORD                   entrypoint; // offset of file_base
+    DWORD                   entrypoint; // RVA
     USHORT                  file_charact;
     USHORT                  dll_charact;
     WORD                    subsystem;
+
+    DWORD                   exp_ordinal_base;
 
     // info derived from file
 
@@ -60,20 +77,19 @@ typedef struct _image_info {
     cpu_bits_t              bits;
     UINT                    file_flags;
 
-    bstr_t                  *export_name;
+    bstr_t                  *exportname;
     size_t                  nb_export;
-    DWORD                   exp_ordinal_base;
-    image_export_t          *export_tbl;
+    image_export_symbol_t   *export_tbl;
 
-    size_t                  nb_dependency;
-    struct _image_info      **dependencies;
+    size_t                  nb_import;
+    image_import_dll_t      *import_tbl;
     
     // mmap (and relative)
 
     mmap_info_t             *filemap;
     mmap_info_t             *map;
 
-    image_nt_headers_t      *nt;
+    PIMAGE_NT_HEADERS       nt;
 
     IMAGE_DATA_DIRECTORY    *data_dir_tbl;
     IMAGE_COR20_HEADER      *cor20;
@@ -84,8 +100,6 @@ typedef struct _image_info {
     // in memory
 
     UINT                    map_flags;
-
-    ll_t                    *stubs;
 
 } image_info_t;
 

@@ -7,8 +7,10 @@
 
 typedef int (WINAPI *PFMyAdd)(int, int);
 
+typedef int (WINAPI *PFstrlen)(const char *);
+
 int main(int argc, const char *argv[]) {
-    PCSTR fullname = "/mnt/hgfs/shared/HelloDll.dll";
+    PCSTR fullname = "/mnt/hgfs/shared/kernel32.dll";
 
     PCSTR dirname = get_dirname(fullname);
     PCSTR basename = get_basename(fullname);
@@ -24,9 +26,9 @@ int main(int argc, const char *argv[]) {
     }
     fprintf(stdout, "INFO: LoadLibrary() %p\n", hDll);
 
-    PFMyAdd pf = (PFMyAdd)rewine_GetProcAddressByName(hDll, "myadd");
+    PFstrlen pf = (PFstrlen)rewine_GetProcAddressByName(hDll, "lstrlenA");
     fprintf(stdout, "pf=%p\n", pf);
-    int ret = pf(1, 2);
+    int ret = pf("HelloWorld");
     fprintf(stdout, "ret=%d\n", ret);
 
     return 0;

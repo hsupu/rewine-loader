@@ -4,6 +4,7 @@
 
 #include "types/wstr.h"
 
+
 PCSTR get_dirname(PCSTR fullname) {
     PCSTR p = strrchr(fullname, '/');
     return strndup(fullname, p - fullname);
