@@ -2,9 +2,9 @@
 
 #pragma once
 
+#include "wintypes/guid.h"
 #include "wintypes/hint.h"
 #include "wintypes/primitive.h"
-#include "wintypes/guid.h"
 #include "wintypes/string.h"
 
 
@@ -718,7 +718,7 @@ typedef IMAGE_SYMBOL_EX UNALIGNED *PIMAGE_SYMBOL_EX;
 #define DECREF(x) ((((x)>>N_TSHIFT)&~N_BTMASK)|((x)&N_BTMASK))
 #endif
 
-#include <pshpack2.h>
+#include "pshpack2.h"
 
 typedef struct IMAGE_AUX_SYMBOL_TOKEN_DEF {
     BYTE  bAuxType;                  // IMAGE_AUX_SYMBOL_TYPE
@@ -729,7 +729,7 @@ typedef struct IMAGE_AUX_SYMBOL_TOKEN_DEF {
 
 typedef IMAGE_AUX_SYMBOL_TOKEN_DEF UNALIGNED *PIMAGE_AUX_SYMBOL_TOKEN_DEF;
 
-#include <poppack.h>
+#include "poppack.h"
 
 //
 // Auxiliary entry format.
@@ -1342,7 +1342,7 @@ typedef struct _IMAGE_EXPORT_DIRECTORY {
 
 typedef struct _IMAGE_IMPORT_BY_NAME {
     WORD    Hint;
-    CHAR   Name[1];
+    CHAR    Name[1];
 } IMAGE_IMPORT_BY_NAME, *PIMAGE_IMPORT_BY_NAME;
 
 #include "pshpack8.h"                       // Use align 8 for the 64-bit IAT.

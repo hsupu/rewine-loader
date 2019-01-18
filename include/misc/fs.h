@@ -2,10 +2,7 @@
 
 #include "wintypes/string.h"
 
-PCSTR get_dirname(PCSTR fullname);
-
-PCWSTR get_dirname_w(PCWSTR fullname);
-
-PCSTR get_basename(PCSTR fullname);
-
-PCWSTR get_basename_w(PCWSTR fullname);
+PCSTR copy_dirname(PCSTR fullname);
+PCWSTR copy_dirname_w(PCWSTR fullname);
+PCSTR copy_basename(PCSTR fullname);
+PCWSTR copy_basename_w(PCWSTR fullname);

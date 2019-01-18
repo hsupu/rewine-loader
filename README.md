@@ -1,6 +1,6 @@
 # rewine loader
 
-The native win32 DLL can be loaded and the routine inside the DLL can be called on Linux application, but you should build every infrastructure to make the DLL work.
+The native win32 DLL can be loaded and the routine inside the DLL can be called on Linux application now, but you should build every infrastructure around to make the DLL work.
 
 For example, we can use the `lstrlenA()` in `kernel32.dll`, because it depends on no DLL else.
 
@@ -24,3 +24,8 @@ Luckily, we do make a step further, you can modify the export symbol of imported
 ```c
 //TODO
 ```
+
+## References
+
+- https://docs.microsoft.com/en-us/windows/desktop/Debug/pe-format
+- https://docs.microsoft.com/en-us/windows/desktop/Dlls/dynamic-link-libraries

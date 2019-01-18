@@ -18,6 +18,7 @@ typedef struct bwstr {
 typedef const BSTR      *PCBSTR;
 typedef const BWSTR     *PCBWSTR;
 
+
 bstr_t * cstr2bstr(const char *cstr);
 const char * bstr2cstr(bstr_t *bstr);
 

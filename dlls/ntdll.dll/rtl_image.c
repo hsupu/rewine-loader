@@ -2,7 +2,6 @@
 
 #include "winapi/rtl.h"
 
-
 PIMAGE_NT_HEADERS WINAPI RtlImageNtHeader(
   PVOID Base
 ) {
@@ -22,7 +21,7 @@ PIMAGE_SECTION_HEADER WINAPI RtlImageRvaToSection(
   PVOID             Base,
   ULONG             Rva
 ) {
-    PIMAGE_SECTION_HEADER sec = (IMAGE_SECTION_HEADER *)((PVOID)(&NtHeaders->OptionalHeader) + NtHeaders->FileHeader.SizeOfOptionalHeader);
+    PIMAGE_SECTION_HEADER sec = (PIMAGE_SECTION_HEADER)((PVOID)(&NtHeaders->OptionalHeader) + NtHeaders->FileHeader.SizeOfOptionalHeader);
     for (int i = 0; i < NtHeaders->FileHeader.NumberOfSections; i++, sec++) {
         if ((sec->VirtualAddress <= Rva) && (sec->VirtualAddress + sec->SizeOfRawData > Rva))
             return (PIMAGE_SECTION_HEADER)sec;
@@ -48,16 +47,6 @@ PVOID WINAPI RtlImageRvaToVa(
     return Base + sec->PointerToRawData + (Rva - sec->VirtualAddress);
 }
 
-static PIMAGE_DATA_DIRECTORY get_image_data_directory32(PIMAGE_OPTIONAL_HEADER32 opt, WORD dir) {
-    if (dir >= opt->NumberOfRvaAndSizes) return NULL;
-    return opt->DataDirectory + dir;
-}
-
-static PIMAGE_DATA_DIRECTORY get_image_data_directory64(PIMAGE_OPTIONAL_HEADER64 opt, WORD dir) {
-    if (dir >= opt->NumberOfRvaAndSizes) return NULL;
-    return opt->DataDirectory + dir;
-}
-
 PVOID WINAPI RtlImageDirectoryEntryToData(
   PVOID Base,
   BOOLEAN MappedAsImage,
@@ -67,31 +56,18 @@ PVOID WINAPI RtlImageDirectoryEntryToData(
     IMAGE_NT_HEADERS *nt = RtlImageNtHeader(Base);
     if (!nt) return NULL;
 
-    DWORD headers_size;
-    const IMAGE_DATA_DIRECTORY *entry;
-    switch (nt->OptionalHeader.Magic) {
-    case IMAGE_NT_OPTIONAL_HDR32_MAGIC: {
-        PIMAGE_OPTIONAL_HEADER32 opt = (PIMAGE_OPTIONAL_HEADER32)(&nt->OptionalHeader);
-        headers_size = opt->SizeOfHeaders;
-        entry = get_image_data_directory32(opt, DirectoryEntry);
-    } break;
-    case IMAGE_NT_OPTIONAL_HDR64_MAGIC: {
-        PIMAGE_OPTIONAL_HEADER64 opt = (PIMAGE_OPTIONAL_HEADER64)(&nt->OptionalHeader);
-        headers_size = opt->SizeOfHeaders;
-        entry = get_image_data_directory64(opt, DirectoryEntry);
-    } break;
-    default:
-        return NULL;
-    }
+    DWORD headers_size = nt->OptionalHeader.SizeOfHeaders;
+    if (DirectoryEntry >= nt->OptionalHeader.NumberOfRvaAndSizes) return NULL;
+    const PIMAGE_DATA_DIRECTORY entry = nt->OptionalHeader.DataDirectory + DirectoryEntry;
     if (!entry || !entry->VirtualAddress) return NULL;
 
-    DWORD addr = entry->VirtualAddress;
+    DWORD address = entry->VirtualAddress;
     *Size = entry->Size;
 
-    if (MappedAsImage || addr < headers_size) {
-        return Base + addr;
+    if (MappedAsImage || address < headers_size) {
+        return Base + address;
     } else {
         // find the section containing the virtual address
-        return RtlImageRvaToVa(nt, Base, addr, NULL);
+        return RtlImageRvaToVa(nt, Base, address, NULL);
     }
 }

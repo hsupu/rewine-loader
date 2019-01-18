@@ -39,8 +39,6 @@ typedef double          DOUBLE,     *PDOUBLE,   *LPDOUBLE;
 // part
 
 typedef BYTE            BOOLEAN,    *PBOOLEAN;  
-
-// wine specific
 typedef BOOLEAN         BOOL,       *PBOOL,    *LPBOOL;
 
 #ifdef FALSE

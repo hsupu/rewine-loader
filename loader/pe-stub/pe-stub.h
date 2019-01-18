@@ -1,6 +1,6 @@
 #pragma once
 
-#include "internal/linker/pe.h"
+#include "types/pe-image.h"
 #include "wintypes/hint.h"
 #include "wintypes/primitive.h"
 #include "wintypes/string.h"

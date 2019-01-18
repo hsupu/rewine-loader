@@ -1,11 +1,12 @@
 #pragma once
 
-#include "internal/linker/pe.h"
+#include "types/pe-image.h"
 #include "wintypes/string.h"
-#include "wintypes/function.h"
+#include "wintypes/fnptr.h"
 
+HMODULE rewine_LoadLibrary(LPCSTR lpLibFileName);
+BOOL rewine_FreeLibrary(HMODULE hLibModule);
 
-HMODULE rewine_LoadLibrary(PCSTR filename);
 FARPROC rewine_GetProcAddressByName(HMODULE hModule, LPCSTR lpProcName);
 FARPROC rewine_GetProcAddressByOrdinal(HMODULE hModule, WORD wOrdinal);
 

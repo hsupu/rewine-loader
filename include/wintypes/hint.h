@@ -1,6 +1,6 @@
 #pragma once
 
-// call convenience (copied from crtdefs.h)
+// calling convention (from crtdefs.h)
 
 #ifndef __stdcall
 # ifdef __i386__
@@ -77,6 +77,14 @@
 
 #ifndef OPTIONAL
 #define OPTIONAL
+#endif
+
+#ifndef _In_
+#define _In_
+#endif
+
+#ifndef _Out_
+#define _Out_
 #endif
 
 // data type modifier

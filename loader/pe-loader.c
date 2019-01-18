@@ -5,89 +5,26 @@
 #include <unistd.h>
 #include <wchar.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 
 #include "misc/fs.h"
 #include "misc/mem.h"
 #include "misc/raii-fd.h"
 #include "misc/raii-mem.h"
-#include "internal/types/primitive.h"
-#include "internal/linker/pe.h"
 #include "types/bstr.h"
 #include "types/linkedlist.h"
-#include "wintypes/ntstatus.h"
-#include "wintypes/handle.h"
-#include "wintypes/function.h"
-
+#include "types/pe-image.h"
 #include "winapi/ldr.h"
 #include "winapi/rtl.h"
+#include "wintypes/fnptr.h"
+#include "wintypes/handle.h"
+#include "wintypes/ntstatus.h"
 
-#include "pe-loader.h"
 #include "pe-stub/pe-stub.h"
+#include "loaded-image.h"
+#include "mem.h"
+#include "pe-loader.h"
 
-
-static const DWORD sector_mask = 0x1ff; // 511
-
-static DWORD page_mask;
-
-static int fd_zero = -1;
-
-static size_t nb_image_info = 0;
-static ll_t *image_info_ll;
-
-// initialize
-
-static void init_page_mask() {
-    if (!page_mask)
-        page_mask = sysconf(_SC_PAGESIZE) - 1;
-}
-
-static void init_fd_zero() {
-    if (fd_zero < 0)
-        fd_zero = open("/dev/zero", O_RDWR);
-}
-
-static void init_image_info_ll() {
-    if (!image_info_ll)
-        image_info_ll = ll_new();
-}
-
-static void __attribute__((constructor)) init_this_file() {
-    init_page_mask();
-    init_fd_zero();
-    init_image_info_ll();
-}
-
-// utils
-
-static int get_page_size() {
-    init_page_mask();
-    return page_mask + 1;
-}
-
-static DWORD align_to(UINT_PTR addr, DWORD size, DWORD mask) {
-    return (DWORD)(((size) + (addr & mask) + mask) & ~mask);
-}
-
-static DWORD align_to_page(UINT_PTR addr, DWORD size) {
-    return align_to(addr, size, page_mask);
-}
-
-static DWORD align_to_sector(UINT_PTR addr, DWORD size) {
-    return align_to(addr, size, sector_mask);
-}
-
-static mmap_info_t * mmap_zero(size_t size) {
-    init_fd_zero();
-
-    void *addr = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE, fd_zero, 0);
-    if (addr == (void *)-1) return NULL;
-
-    mmap_info_t *mi = MALLOC_S(mmap_info_t, 1);
-    mi->addr = addr;
-    mi->size = size;
-    return mi;
-}
+static int load_dll_c(PCSTR filename, OUT image_info_t **out_image);
 
 /**
  * get relative virtual address
@@ -97,31 +34,7 @@ static PVOID rva2va(image_info_t *image, LONG_PTR offset) {
         fprintf(stderr, "ERR: rva2va: out of range: offset=%#zx size=%#zx\n", offset, image->map->size);
         return NULL;
     }
-    return image->map->addr + offset;
-}
-
-// funcs
-
-static int load_dll_c(PCSTR filename, OUT image_info_t **out_image);
-
-static int mmap_image_file(int fd, OUT mmap_info_t **out_mi) {
-    struct stat fd_stat;
-    if (fstat(fd, &fd_stat) < 0) {
-        return 1;
-    }
-    mmap_info_t *mi = MALLOC_S(mmap_info_t, 1);
-    if (!mi) {
-        return 2;
-    }
-    *out_mi = mi;
-
-    mi->offset = 0;
-    mi->size = fd_stat.st_size;
-    mi->addr = mmap(NULL, mi->size, PROT_READ, MAP_SHARED, fd, mi->offset);
-    if (mi->addr == (void *)-1) {
-        return 3;
-    }
-    return 0;
+    return image->map->address + offset;
 }
 
 static NTSTATUS get_nt_from_mmap(mmap_info_t *mi, OUT PIMAGE_NT_HEADERS *out_nt) {
@@ -142,64 +55,34 @@ static NTSTATUS get_nt_from_mmap(mmap_info_t *mi, OUT PIMAGE_NT_HEADERS *out_nt)
         return STATUS_INVALID_IMAGE_NE_FORMAT;
     }
     *out_nt = nt;
+
     return STATUS_SUCCESS;
 }
 
-static void before_remmap_image(image_info_t *image, PIMAGE_OPTIONAL_HEADER hdr) {
-    image->image_base        = hdr->ImageBase;
-    image->image_size        = align_to_page(0, hdr->SizeOfImage);
-    image->headers_size      = hdr->SizeOfHeaders;
-    image->is_flatmap        = (hdr->SectionAlignment & page_mask) ? TRUE : FALSE;
-}
-
-/**
- * remap image (partial) after base/size is set
- * - copy headers
- * - reset nt pointer
- * use file mmap if flatmap (non page-unaligned binary, for native subsystem binary)
- * we can use rva2va() after this
- */
-static int remmap_image(image_info_t *image) {
+static int remmap_image_headers(image_info_t *image) {
+    int ret;
     NTSTATUS status;
 
-    if (image->is_flatmap) {
-        image->map = image->filemap;
-    } else {
-        image->map = mmap_zero(image->image_size);
-        if (!image->map) {
-            return 1;
-        }
-        memcpy(image->map->addr, image->filemap->addr, image->headers_size);
+    ret = mmap_zero((image->is_fixed_base) ? image->image_base : NULL, image->image_size, &image->map);
+    if (ret) {
+        fprintf(stderr, "ERR: mmap /dev/zero failed: %d\n", ret);
+        return 1;
     }
+    image->map->pos = image->filemap->pos;
+    image->map->carry = image->filemap->carry;
+    memcpy(image->map->address, image->filemap->address, image->headers_size);
+    
     status = get_nt_from_mmap(image->map, &image->nt);
     if (status) {
-        fprintf(stderr, "FIXME: remmap but nt check violation\n");
+        fprintf(stderr, "ERR: remmap but headers is broken: status=%#xu\n", status);
         return 2;
     }
     return 0;
 }
 
-static NTSTATUS load_optional_header(image_info_t *image, PIMAGE_OPTIONAL_HEADER hdr) {
-    image->entrypoint = hdr->AddressOfEntryPoint;
-    image->dll_charact = hdr->DllCharacteristics;
-    image->subsystem  = hdr->Subsystem;
-
-    UINT file_flags = 0;
-    
-    int has_code = hdr->SizeOfCode || hdr->AddressOfEntryPoint || (hdr->SectionAlignment & page_mask);
-    int has_clr = hdr->DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR].Size;
-    if ((hdr->DllCharacteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE) && has_code && !has_clr)
-        file_flags |= IMAGE_FILE_FLAGS_ALREADY_RELOCATED;
-
-    image->file_flags = file_flags;
-
-    if (image->is_flatmap) {
-        if (hdr->FileAlignment != hdr->SectionAlignment) return STATUS_INVALID_FILE_FOR_SECTION;
-    }
-    
-    image->data_dir_tbl = hdr->DataDirectory;
-
-    return STATUS_SUCCESS;
+static int verify_image_checksum(image_info_t *image) {
+    //TODO
+    return 0;
 }
 
 static NTSTATUS load_image(image_info_t *image) {
@@ -235,38 +118,35 @@ static NTSTATUS load_image(image_info_t *image) {
     if (image->bits != CPU_BITS_32) return STATUS_INVALID_IMAGE_WIN_64;
 #endif
 
-    image->file_charact = nt->FileHeader.Characteristics;
+    DWORD file_charact = nt->FileHeader.Characteristics;
 
-    if (!nt->FileHeader.SizeOfOptionalHeader ||
-            !rewine_mmap_next(fmi, nt->FileHeader.SizeOfOptionalHeader)) {
+    image->is_exe = (file_charact & IMAGE_FILE_EXECUTABLE_IMAGE); 
+    image->is_dll = (file_charact & IMAGE_FILE_DLL);
+
+    if (!nt->FileHeader.SizeOfOptionalHeader || !rewine_mmap_next(fmi, nt->FileHeader.SizeOfOptionalHeader)) {
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
-    cpu_bits_t bits;
-    switch (nt->OptionalHeader.Magic) {
-    case IMAGE_NT_OPTIONAL_HDR32_MAGIC:
-        bits = CPU_BITS_32;
-        break;
+    PIMAGE_OPTIONAL_HEADER opthdr = &(nt->OptionalHeader);
+    image->is_fixed_base    = opthdr->DllCharacteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE;
+    image->image_base       = (PVOID)opthdr->ImageBase;
+    image->image_size       = align_to_page(0, opthdr->SizeOfImage);
+    image->headers_size     = opthdr->SizeOfHeaders;
+    image->is_flatmap       = (opthdr->SectionAlignment & page_mask) ? TRUE : FALSE;
 
-    case IMAGE_NT_OPTIONAL_HDR64_MAGIC:
-        bits = CPU_BITS_64;
-        break;
+    if (image->is_flatmap && (opthdr->FileAlignment != opthdr->SectionAlignment)) return STATUS_INVALID_FILE_FOR_SECTION;
+    if (opthdr->Win32VersionValue) return STATUS_INVALID_IMAGE_FORMAT;
+    if (opthdr->LoaderFlags) return STATUS_INVALID_IMAGE_FORMAT;
+    
+    if (verify_image_checksum(image)) return STATUS_INVALID_IMAGE_FORMAT;
 
-    default:
-        return STATUS_INVALID_IMAGE_FORMAT;
-    }
-    if (bits != image->bits) return STATUS_INVALID_IMAGE_FORMAT;
-
-    before_remmap_image(image, &(nt->OptionalHeader));
-    ret = remmap_image(image);
+    // remmap image headers after image base/size is set
+    // we can use rva2va() after this
+    ret = remmap_image_headers(image);
     if (ret) return STATUS_NO_MEMORY;
-    nt = image->nt;
-    ret = load_optional_header(image, &(nt->OptionalHeader));
-    if (ret) return ret;
- 
-    image->map->pos = fmi->pos;
-    image->map->carry = fmi->carry;
 
+    nt = image->nt;
+ 
     // clr contains continuous sections from clr->VirtualAddress
     //TODO: load_clr()
 
@@ -275,37 +155,44 @@ static NTSTATUS load_image(image_info_t *image) {
         return STATUS_INVALID_FILE_FOR_SECTION;
     }
 
-    PIMAGE_SECTION_HEADER sec_tbl = (PIMAGE_SECTION_HEADER)rewine_mmap_current(image->map);
-    image->sec_mmap_tbl = MALLOC_S(mmap_info_t, nb_section);
-
-    PIMAGE_SECTION_HEADER sec = sec_tbl;
-    mmap_info_t *sec_mmap = image->sec_mmap_tbl;
-
+    PIMAGE_SECTION_HEADER section = (PIMAGE_SECTION_HEADER)rewine_mmap_current(image->map);
     if (image->is_flatmap) {
-        // non page-unaligned binary (native subsystem binary)
-        // just mmap the whole file
-
-        for (int i = 0; i < nb_section; i++, sec++, sec_mmap++) {
+        // non page-aligned binary (native subsystem binary) just mmap the whole file
+        for (int i = 0; i < nb_section; i++, section++) {
             // check if sections are loaded to the right offset
-            if (sec->VirtualAddress != sec->PointerToRawData)
-                return STATUS_INVALID_FILE_FOR_SECTION;
-            
-            sec_mmap->offset = sec->VirtualAddress;
-            sec_mmap->addr = rva2va(image, sec_mmap->offset);
-            sec_mmap->size = sec->SizeOfRawData;
+            if (section->VirtualAddress != section->PointerToRawData)
+                fprintf(stderr, "ERR: load_dll: non page-aligned binary are loaded with an incorrect offset (section %d).\n", i + 1);
         }
+        memcpy(
+            image->map->address + nt->OptionalHeader.SizeOfHeaders,
+            image->filemap->address + nt->OptionalHeader.SizeOfHeaders,
+            nt->OptionalHeader.SizeOfImage - nt->OptionalHeader.SizeOfHeaders
+        );
     } else {
-        for (int i = 0; i < nb_section; i++, sec++, sec_mmap++) {
-            size_t file_offset = align_to_sector(0, sec->PointerToRawData);
-            size_t file_size = align_to_sector(sec->PointerToRawData, sec->SizeOfRawData);
-            if (!file_offset || !file_size) continue;
+        image->section_map_tbl = MALLOC_S(mmap_info_t, nb_section);
+        mmap_info_t *section_map = image->section_map_tbl;
 
-            sec_mmap->offset = sec->VirtualAddress;
-            sec_mmap->addr = rva2va(image, sec_mmap->offset);
-            sec_mmap->size = align_to_page(0, (sec->Misc.VirtualSize) ? sec->Misc.VirtualSize : sec->SizeOfRawData);
-            //fprintf(stdout, "INFO: load_image offset=%#zx mapping=%p+%#zx\n", sec_mmap->offset, sec_mmap->addr, sec_mmap->size);
+        for (int i = 0; i < nb_section; i++, section++, section_map++) {
+            section_map->offset = section->PointerToRawData;
+            section_map->address = rva2va(image, section->VirtualAddress);
+            section_map->size = align_to_page(0, section->Misc.VirtualSize);
 
-            memcpy(sec_mmap->addr, fmi->addr + file_offset, sec_mmap->size);
+            DWORD section_charact = section->Characteristics;
+            size_t copy_size = min(section->SizeOfRawData, section_map->size);
+            if (copy_size) {
+                BOOL allow = TRUE;
+                if (section_charact & IMAGE_SCN_CNT_UNINITIALIZED_DATA) {
+                    allow = FALSE;
+                    fprintf(stderr, "ERR: load_dll: attempt to copy uninitialized data (section %d).\n", i + 1);
+                }
+                if (!(section_charact & (IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_CNT_CODE))) {
+                    allow = FALSE;
+                    fprintf(stderr, "ERR: load_dll: attempt to copy unknown characteristics data (section %d).\n", i + 1);
+                }
+                if (allow) memcpy(section_map->address, fmi->address + section->PointerToRawData, copy_size);
+            }
+
+            set_mmap_protect(section, section_map);
         }
     }
 
@@ -325,7 +212,7 @@ static int relocate(image_info_t *image) {
         return 0;
     }
 
-    if (!(image->dll_charact & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE)) {
+    if (!(image->nt->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE)) {
         fprintf(stderr, "ERR: relocate: fixed image base\n");
         return 1;
     }
@@ -336,10 +223,10 @@ static int relocate(image_info_t *image) {
     }
 
     ULONG size;
-    PIMAGE_BASE_RELOCATION reld = RtlImageDirectoryEntryToData(image->map->addr, TRUE, IMAGE_DIRECTORY_ENTRY_BASERELOC, &size);
+    PIMAGE_BASE_RELOCATION reld = RtlImageDirectoryEntryToData(image->map->address, TRUE, IMAGE_DIRECTORY_ENTRY_BASERELOC, &size);
     if (!reld) return 0;
 
-    INT_PTR delta = (LONG_PTR)(image->map->addr - image->image_base);
+    INT_PTR delta = (LONG_PTR)(image->map->address - image->image_base);
 
     size_t used = 0;
     while (used < size) {
@@ -356,7 +243,7 @@ static int relocate(image_info_t *image) {
 
 static int load_exports(image_info_t *image) {
     ULONG size;
-    PIMAGE_EXPORT_DIRECTORY expd = RtlImageDirectoryEntryToData(image->map->addr, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &size);
+    PIMAGE_EXPORT_DIRECTORY expd = RtlImageDirectoryEntryToData(image->map->address, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &size);
     if (!expd) return 0;
 
     image->exportname = cstr2bstr(rva2va(image, expd->Name));
@@ -364,7 +251,7 @@ static int load_exports(image_info_t *image) {
     size_t nb_export;
     nb_export = image->nb_export = expd->NumberOfFunctions;
 
-    DWORD ordinal_base = image->exp_ordinal_base = expd->Base;
+    DWORD ordinal_base = image->export_ordinal_base = expd->Base;
 
     PDWORD fn_tbl = rva2va(image, expd->AddressOfFunctions);
     PDWORD name_tbl = rva2va(image, expd->AddressOfNames);
@@ -392,42 +279,6 @@ static int load_exports(image_info_t *image) {
     }
 
     return 0;
-}
-
-static int find_dll_by_filename_in_ll(ll_t *ll, size_t offset, void *ptr, void *arg, void **presult) {
-    image_info_t *image = (image_info_t *)ptr;
-    if (image->filename) {
-        PBSTR name = (PBSTR)arg;
-        if (bstrcmp(image->filename, name) == 0) {
-            *((image_info_t **)presult) = image;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static image_info_t * find_loaded_dll_by_filename(PBSTR name) {
-    if (!name) return NULL;
-    void *result = ll_enumerate(image_info_ll, find_dll_by_filename_in_ll, name);
-    return (image_info_t *)result;
-}
-
-static int find_dll_by_exportname_in_ll(ll_t *ll, size_t offset, void *ptr, void *arg, void **presult) {
-    image_info_t *image = (image_info_t *)ptr;
-    if (image->exportname) {
-        PBSTR name = (PBSTR)arg;
-        if (bstrcmp(image->exportname, name) == 0) {
-            *((image_info_t **)presult) = image;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static image_info_t * find_loaded_dll_by_exportname(PBSTR name) {
-    if (!name) return NULL;
-    void *result = ll_enumerate(image_info_ll, find_dll_by_exportname_in_ll, name);
-    return (image_info_t *)result;
 }
 
 static PVOID get_forwarded_export(image_info_t *image, PCSTR label);
@@ -589,21 +440,27 @@ static int fixup_delayload_import(image_info_t *image) {
     return 0;
 }
 
+static int cleanup_discardable(image_info_t *image) {
+    //TODO
+    return 0;
+}
+
 static int load_native_dll(image_info_t *image, int fd) {
     int ret;
     NTSTATUS status;
 
     mmap_info_t *fmi;
-    ret = mmap_image_file(fd, &fmi);
+    ret = mmap_pe_file(fd, &fmi);
     if (ret) {
-        fprintf(stderr, "ERR: load_native_dll mmap_image_file: %d\n", ret);
+        fprintf(stderr, "ERR: load_native_dll mmap_pe_file return %d\n", ret);
         return 1;
     }
     image->filemap = fmi;
 
     status = load_image(image);
+    rewine_mmap_free(fmi);
     if (status) {
-        fprintf(stderr, "ERR: load_native_dll load_image: %x\n", status);
+        fprintf(stderr, "ERR: load_native_dll load_image return %x\n", status);
         return 2;
     }
 
@@ -619,14 +476,15 @@ static int load_native_dll(image_info_t *image, int fd) {
         return 4;
     }
 
-    if ((image->file_charact & IMAGE_FILE_DLL)
-            || (image->subsystem == IMAGE_SUBSYSTEM_NATIVE)) {
+    if ((image->is_dll) || (image->subsystem == IMAGE_SUBSYSTEM_NATIVE)) {
         ret = fixup_imports(image);
         if (ret) {
             fprintf(stderr, "ERR: load_native_dll fixup_imports: %d\n", ret);
             return 5;
         }
     }
+
+    cleanup_discardable(image);
 
     fprintf(stdout, "INFO: loaded %s (%p)\n", image->exportname->str, image->filename->str);
     
@@ -658,12 +516,12 @@ static int load_dll(PBSTR filename, OUT image_info_t **out_image) {
     }
 
     ret = load_native_dll(image, fd);
-    close(fd); fd = 0; // avoid RAII
     if (ret) {
         fprintf(stderr, "ERR: load_dll load_native_dll: %d\n", ret);
         return 2;
     }
 
+    add_loaded_dll(image);
     return 0;
 }
 
@@ -675,10 +533,10 @@ static int load_dll_c(PCSTR filename, OUT image_info_t **out_image) {
     return ret;
 }
 
-HMODULE rewine_LoadLibrary(PCSTR filename) {
+HMODULE rewine_LoadLibrary(LPCSTR lpLibFileName) {
     int ret;
     image_info_t *dll;
-    ret = load_dll_c(filename, &dll);
+    ret = load_dll_c(lpLibFileName, &dll);
     if (ret) {
         fprintf(stderr, "ERR: LoadLibrary load_dll: %d\n", ret);
         return (HMODULE)NULL;

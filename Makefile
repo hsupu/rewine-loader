@@ -2,7 +2,7 @@ CC=gcc
 
 DUMMY=
 
-OBJ_COMMON_DIR= ../common
+OBJ_COMMON_DIR= ../../common
 OBJ_COMMON= \
 	$(OBJ_COMMON_DIR)/internal/linker/mapping.o \
 	$(OBJ_COMMON_DIR)/types/bstr.o \
@@ -12,7 +12,7 @@ OBJ_COMMON= \
 	$(OBJ_COMMON_DIR)/misc/raii.o \
 	$(DUMMY)
 
-OBJ_DLL_DIR= ../dlls
+OBJ_DLL_DIR= ../../dlls
 OBJ_DLL= \
 	$(OBJ_DLL_DIR)/ntdll.dll/ldr.o \
 	$(OBJ_DLL_DIR)/ntdll.dll/rtl.o \
@@ -31,7 +31,7 @@ OBJ_TESTS= \
 
 FINAL=a.out
 
-CFLAGS= -std=c11 -g -O0 -I. -I../include -D_WIN64 -D_POSIX_C_SOURCE=20190115
+CFLAGS= -std=c11 -g -O0 -I. -I../../include -D_WIN64 -D_POSIX_C_SOURCE=20190115
 
 
 .PHONE: all

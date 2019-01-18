@@ -95,15 +95,13 @@ void * ll_shift(ll_t *ll) {
     return ll_remove(ll, ll->head->next);
 }
 
-typedef int (*pfn_ll_enumerator)(ll_t *ll, size_t offset, void *ptr, void *arg, void **result);
-
-void * ll_enumerate(ll_t *ll, pfn_ll_enumerator fn, void *arg) {
+void * ll_enumerate(ll_t *ll, pf_ll_enumerator fn, void *arg) {
     void *result = NULL;
     int interrupted;
     size_t offset = 0;
     ll_node_t *node = ll->head->next;
     while (node) {
-        interrupted = fn(ll, offset, node->ptr, arg, &result);
+        interrupted = fn(ll, offset, node, arg, &result);
         if (interrupted || result) break;
 
         offset++;

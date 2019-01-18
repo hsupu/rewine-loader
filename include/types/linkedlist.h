@@ -29,5 +29,5 @@ void * ll_pop(ll_t *ll);
 ll_node_t * ll_unshift(ll_t *ll, void *ptr);
 void * ll_shift(ll_t *ll);
 
-typedef int (*pfn_ll_enumerator)(ll_t *ll, size_t offset, void *ptr, void *arg, void **result);
-void * ll_enumerate(ll_t *ll, pfn_ll_enumerator fn, void *arg);
+typedef int (*pf_ll_enumerator)(ll_t *ll, size_t offset, ll_node_t *node, void *arg, void **result);
+void * ll_enumerate(ll_t *ll, pf_ll_enumerator fn, void *arg);
