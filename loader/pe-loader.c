@@ -296,7 +296,7 @@ static PVOID get_export(image_info_t *image, image_export_symbol_t *export) {
 
 static PVOID get_export_by_ordinal(image_info_t *image, WORD ordinal) {
     if (!image || !image->nb_export) return NULL;
-    int index = ordinal - image->exp_ordinal_base;
+    int index = ordinal - image->export_ordinal_base;
     image_export_symbol_t *export = image->export_tbl + index;
     return get_export(image, export);
 }
